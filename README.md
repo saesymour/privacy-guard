@@ -1,6 +1,6 @@
 # 隐私守护助手 (Privacy Guard)
 
-基于 OpenCV 的实时摄像头人脸检测与自动切屏工具。当笔记本摄像头检测到陌生人、人脸数量变化或背景异常运动时，自动执行 `Win + D` 显示桌面，保护你的隐私。
+基于 OpenCV 的实时摄像头人脸检测与自动切屏工具，集成 **MiMo-V2.5 多模态大模型**实现智能场景语义分析。当笔记本摄像头检测到陌生人、人脸数量变化或背景异常运动时，自动执行 `Win + D` 显示桌面，保护你的隐私。
 
 ## 功能特性
 
@@ -10,6 +10,8 @@
 - **自动切屏**：满足触发条件时自动执行 Win+D 最小化所有窗口
 - **冷却机制**：防止短时间内重复触发
 - **日志记录**：所有触发事件和程序状态记录到日志文件
+- **🆕 MiMo 智能场景分析**：调用 MiMo-V2.5 多模态模型对触发事件做二次验证，区分"同事路过"与"陌生人偷看"，减少误报
+- **🆕 AI 日志日报**：基于 MiMo LLM 自动分析运行日志，生成安全日报与参数优化建议
 
 ## 运行环境
 
@@ -20,13 +22,14 @@
 | opencv-contrib-python | 4.8.0 |
 | pyautogui | 0.9.54 |
 | numpy | 1.24.0 |
+| openai | 1.0.0+ |
 
 ## 快速开始
 
 ### 1. 安装依赖
 
 ```bash
-pip install opencv-python opencv-contrib-python pyautogui numpy
+pip install opencv-python opencv-contrib-python pyautogui numpy openai
 ```
 
 ### 2. 录入人脸
@@ -39,7 +42,17 @@ python enroll_face.py
 - 面对摄像头，按 **SPACE** 拍摄照片（建议 10-20 张，覆盖不同角度）
 - 按 **ESC** 完成拍摄并自动训练识别模型
 
-### 3. 启动守护
+### 3. （可选）启用 MiMo 智能分析
+
+```bash
+# 设置 MiMo API Key（从 https://platform.xiaomimimo.com 获取）
+set MIMO_API_KEY=sk-xxxxxxxxxxxxxxxx
+
+# 编辑 config.py，将 SMART_ANALYZER_ENABLED 改为 True
+# SMART_ANALYZER_ENABLED = True
+```
+
+### 4. 启动守护
 
 ```bash
 python main.py
@@ -52,9 +65,11 @@ python main.py
 
 ```
 privacy-guard/
-├── main.py                # 主程序：实时检测 + 触发切屏
+├── main.py                # 主程序：实时检测 + 触发切屏 + MiMo 智能分析
 ├── enroll_face.py         # 人脸录入与模型训练
-├── config.py              # 配置文件（阈值、冷却时间等参数）
+├── smart_analyzer.py      # MiMo Vision API 智能场景分析模块
+├── daily_reporter.py      # MiMo Chat API 日志分析与日报生成
+├── config.py              # 配置文件（阈值、冷却时间、MiMo API 等参数）
 ├── requirements.txt       # Python 依赖清单
 ├── README.md              # 项目说明
 ├── known_faces/           # 人脸数据（运行后生成）
@@ -76,6 +91,33 @@ privacy-guard/
 | `COOLDOWN_SECONDS` | 5 | 两次切屏最小间隔（秒） |
 | `MOTION_RATIO_THRESHOLD` | 0.05 | 运动检测灵敏度（5% 画面变化） |
 | `SHOW_PREVIEW` | True | 是否显示摄像头预览窗口 |
+
+### MiMo 智能分析设置
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `SMART_ANALYZER_ENABLED` | False | 是否启用 MiMo 智能分析 |
+| `MIMO_API_KEY` | None | MiMo API 密钥（建议用环境变量） |
+| `MIMO_BASE_URL` | `https://api.xiaomimimo.com/v1` | API 地址 |
+| `MIMO_MODEL` | `mimo-v2.5` | 模型名（可选 `mimo-v2.5-pro` / `mimo-v2-omni`） |
+| `MIMO_TIMEOUT` | 5.0 | API 超时（秒） |
+| `MIMO_MIN_INTERVAL` | 2.0 | 两次智能分析最小间隔（秒） |
+| `MIMO_TRIGGER_CONDITIONS` | `["stranger", "face_change"]` | 哪些条件触发智能分析 |
+
+## 智能日志分析
+
+```bash
+# 生成今日安全日报
+python daily_reporter.py
+
+# 指定日志文件和日期
+python daily_reporter.py logs/privacy_guard.log --date 2026-05-22
+
+# JSON 格式输出
+python daily_reporter.py --json
+```
+
+日报包含：触发事件统计、原因分布、高峰时段、误报评估、异常事件、参数优化建议。
 
 ## 触发条件
 

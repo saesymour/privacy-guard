@@ -24,6 +24,13 @@ import pyautogui
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import config as cfg
 
+# 智能分析器（可选，需要 MiMo API Key）
+try:
+    from smart_analyzer import SmartAnalyzer, create_analyzer_from_config
+    SMART_ANALYZER_AVAILABLE = True
+except ImportError:
+    SMART_ANALYZER_AVAILABLE = False
+
 # pyautogui 安全设置 — 鼠标移到左上角可紧急中止
 pyautogui.FAILSAFE = True
 
@@ -205,10 +212,19 @@ class PrivacyGuard:
         # 陌生人触发标志（防止同一事件重复触发）
         self.stranger_already_triggered = False
 
+        # 智能分析器（可选）
+        self.smart_analyzer = None
+        self.smart_last_analysis_time = 0
+        if SMART_ANALYZER_AVAILABLE and cfg.SMART_ANALYZER_ENABLED:
+            self.smart_analyzer = create_analyzer_from_config(cfg)
+            if not self.smart_analyzer.enabled:
+                self.smart_analyzer = None
+
         logger.info("=" * 50)
         logger.info("隐私守护助手已启动")
         logger.info(f"人脸识别状态: {'已就绪' if self.face_recognizer.enrolled else '仅检测模式（请先录入人脸）'}")
         logger.info(f"触发冷却: {cfg.COOLDOWN_SECONDS} 秒")
+        logger.info(f"MiMo 智能分析: {'已启用' if self.smart_analyzer else '未启用（设置 MIMO_API_KEY 后开启）'}")
         logger.info("按 Q 键退出程序")
         logger.info("=" * 50)
 
@@ -300,7 +316,9 @@ class PrivacyGuard:
 
                 # ---- 6. 判断触发条件 ----
                 trigger_reason = None
+                trigger_type = None  # 用于智能分析的条件筛选
                 now = time.time()
+                smart_analysis = None
 
                 # 冷却时间内不触发
                 if now - self.last_trigger_time < cfg.COOLDOWN_SECONDS:
@@ -310,19 +328,49 @@ class PrivacyGuard:
                     if (self.stranger_consecutive >= cfg.STRANGER_CONSECUTIVE_FRAMES
                             and not self.stranger_already_triggered):
                         trigger_reason = "陌生人出现在摄像头前"
+                        trigger_type = "stranger"
                         self.stranger_already_triggered = True
 
                     # 条件 B：人脸数量变化
                     elif face_count_changed and face_count > 0:
                         trigger_reason = f"人脸数量变化: {self.face_count_stable} -> {face_count}"
+                        trigger_type = "face_change"
 
                     # 条件 C：显著运动（无人脸时）
                     elif has_motion and face_count == 0:
                         trigger_reason = f"检测到背景显著运动 ({motion_ratio:.1%})"
+                        trigger_type = "motion"
+
+                # ---- 6.5 MiMo 智能分析（二次验证） ----
+                if (trigger_reason and self.smart_analyzer
+                        and trigger_type in cfg.MIMO_TRIGGER_CONDITIONS
+                        and now - self.smart_last_analysis_time >= cfg.MIMO_MIN_INTERVAL):
+                    smart_analysis = self.smart_analyzer.analyze(
+                        frame_bgr=frame,
+                        face_count=face_count,
+                        stranger_count=stranger_count,
+                        motion_ratio=motion_ratio,
+                        has_motion=has_motion,
+                        cooldown_active=False,
+                    )
+                    self.smart_last_analysis_time = now
+
+                    if smart_analysis:
+                        # 根据 MiMo 分析结果调整动作
+                        if smart_analysis.action == "ignore":
+                            logger.info(f"MiMo 分析判定为误报，跳过触发: {smart_analysis.reason}")
+                            trigger_reason = None  # 取消触发
+                        elif smart_analysis.action == "warn":
+                            logger.info(f"MiMo 建议语音提醒: {smart_analysis.reason}")
+                            # 暂不实现 TTS，记录日志即可
+                            # 继续执行切屏（保守策略）
 
                 # ---- 7. 执行触发 ----
                 if trigger_reason:
-                    logger.warning(f"触发！原因: {trigger_reason}")
+                    analysis_info = ""
+                    if smart_analysis:
+                        analysis_info = f" | MiMo: [{smart_analysis.threat_level}] {smart_analysis.reason}"
+                    logger.warning(f"触发！原因: {trigger_reason}{analysis_info}")
                     self.desktop.show_desktop()
                     self.last_trigger_time = now
 
@@ -350,8 +398,15 @@ class PrivacyGuard:
 
                 cv2.putText(display_frame, status, (10, display_frame.shape[0] - 40),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, status_color, 2)
-                cv2.putText(display_frame, "Q=Quit", (10, display_frame.shape[0] - 10),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                # MiMo 状态
+                if self.smart_analyzer:
+                    stats = self.smart_analyzer.stats
+                    mimo_text = f"MiMo: {stats['calls']}calls {stats['total_tokens']}tks"
+                    cv2.putText(display_frame, mimo_text, (10, display_frame.shape[0] - 10),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 200, 100), 1)
+                else:
+                    cv2.putText(display_frame, "Q=Quit", (10, display_frame.shape[0] - 10),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
                 # 冷却进度条
                 if cooldown_left > 0:
@@ -374,6 +429,11 @@ class PrivacyGuard:
             cap.release()
             cv2.destroyAllWindows()
             self.face_detector.release()
+            if self.smart_analyzer:
+                stats = self.smart_analyzer.stats
+                logger.info(f"MiMo 智能分析统计: {stats['calls']}次调用, "
+                            f"{stats['total_tokens']}tokens, "
+                            f"平均延迟 {stats['avg_latency_ms']}ms")
             logger.info("隐私守护助手已停止")
 
 
