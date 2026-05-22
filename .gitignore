@@ -1,0 +1,24 @@
+# 日志文件
+logs/
+*.log
+
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+
+# 虚拟环境
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+
+# 人脸数据（包含个人隐私，不要上传！）
+known_faces/
+
+# 系统文件
+Thumbs.db
+Desktop.ini
