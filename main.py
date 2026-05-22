@@ -212,6 +212,9 @@ class PrivacyGuard:
         # 陌生人触发标志（防止同一事件重复触发）
         self.stranger_already_triggered = False
 
+        # 无人脸连续帧计数（用于运动触发的前置条件）
+        self.no_face_consecutive = 0
+
         # 智能分析器（可选）
         self.smart_analyzer = None
         self.smart_last_analysis_time = 0
@@ -291,6 +294,12 @@ class PrivacyGuard:
                 # ---- 3. 运动检测 ----
                 has_motion, motion_ratio = self.motion_detector.detect(frame)
 
+                # ---- 3.5 无人脸连续帧计数 ----
+                if face_count == 0:
+                    self.no_face_consecutive += 1
+                else:
+                    self.no_face_consecutive = 0
+
                 # ---- 4. 人脸数量变化检测 ----
                 # 使用稳定计数器避免短时波动（检测闪烁）
                 if face_count == self.last_face_count:
@@ -299,7 +308,7 @@ class PrivacyGuard:
                     self.face_count_stable_counter = 0
 
                 face_count_changed = False
-                if self.face_count_stable_counter >= 5:  # 连续5帧稳定后确认
+                if self.face_count_stable_counter >= cfg.FACE_STABLE_FRAMES:  # 连续N帧稳定后确认
                     if self.face_count_stable != face_count:
                         if self.face_count_stable != 0 or face_count != 0:
                             face_count_changed = True
@@ -316,13 +325,19 @@ class PrivacyGuard:
 
                 # ---- 6. 判断触发条件 ----
                 trigger_reason = None
-                trigger_type = None  # 用于智能分析的条件筛选
+                trigger_type = None
                 now = time.time()
                 smart_analysis = None
 
-                # 冷却时间内不触发
-                if now - self.last_trigger_time < cfg.COOLDOWN_SECONDS:
-                    pass
+                # 计算实际冷却时间（运动触发使用倍增冷却）
+                effective_cooldown = cfg.COOLDOWN_SECONDS
+                if self.last_trigger_time > 0:
+                    last_was_motion = getattr(self, '_last_trigger_was_motion', False)
+                    if last_was_motion:
+                        effective_cooldown = cfg.COOLDOWN_SECONDS * cfg.MOTION_TRIGGER_COOLDOWN_MULTIPLIER
+
+                if now - self.last_trigger_time < effective_cooldown:
+                    pass  # 冷却中，不检测
                 else:
                     # 条件 A：陌生人出现
                     if (self.stranger_consecutive >= cfg.STRANGER_CONSECUTIVE_FRAMES
@@ -337,7 +352,9 @@ class PrivacyGuard:
                         trigger_type = "face_change"
 
                     # 条件 C：显著运动（无人脸时）
-                    elif has_motion and face_count == 0:
+                    # 额外要求：确认人脸已消失一段时间，排除人脸检测闪烁导致的连锁触发
+                    elif (has_motion and face_count == 0
+                          and self.no_face_consecutive >= cfg.MOTION_FACE_ABSENCE_FRAMES):
                         trigger_reason = f"检测到背景显著运动 ({motion_ratio:.1%})"
                         trigger_type = "motion"
 
@@ -373,6 +390,7 @@ class PrivacyGuard:
                     logger.warning(f"触发！原因: {trigger_reason}{analysis_info}")
                     self.desktop.show_desktop()
                     self.last_trigger_time = now
+                    self._last_trigger_was_motion = (trigger_type == "motion")
 
                 # ---- 8. 更新状态 ----
                 self.last_face_count = face_count
@@ -385,10 +403,15 @@ class PrivacyGuard:
                             (0, 0, 255) if has_motion else (0, 255, 0), 2)
 
                 # 状态栏 — 底部
-                cooldown_left = cfg.COOLDOWN_SECONDS - (now - self.last_trigger_time)
+                last_was_motion = getattr(self, '_last_trigger_was_motion', False)
+                effective_cooldown_display = (cfg.COOLDOWN_SECONDS *
+                    cfg.MOTION_TRIGGER_COOLDOWN_MULTIPLIER if last_was_motion
+                    else cfg.COOLDOWN_SECONDS)
+                cooldown_left = effective_cooldown_display - (now - self.last_trigger_time)
                 if cooldown_left > 0:
-                    status = f"COOLDOWN: {cooldown_left:.1f}s"
-                    status_color = (0, 165, 255)
+                    motion_tag = " [motion x3]" if last_was_motion else ""
+                    status = f"COOLDOWN: {cooldown_left:.1f}s{motion_tag}"
+                    status_color = (0, 140, 255) if last_was_motion else (0, 165, 255)
                 elif strangers_detected:
                     status = "ALERT: Stranger!"
                     status_color = (0, 0, 255)
@@ -410,9 +433,10 @@ class PrivacyGuard:
 
                 # 冷却进度条
                 if cooldown_left > 0:
-                    bar_width = int((cooldown_left / cfg.COOLDOWN_SECONDS) * 200)
+                    bar_width = int((cooldown_left / effective_cooldown_display) * 200)
+                    bar_color = (0, 140, 255) if last_was_motion else (0, 165, 255)
                     cv2.rectangle(display_frame, (10, 455), (10 + bar_width, 465),
-                                  (0, 165, 255), -1)
+                                  bar_color, -1)
 
                 if cfg.SHOW_PREVIEW:
                     cv2.imshow(cfg.WINDOW_NAME, display_frame)
