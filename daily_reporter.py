@@ -150,10 +150,12 @@ Generate a daily report based on the log above."""
 
         raw = response.choices[0].message.content.strip()
 
-        # 提取 JSON
-        if raw.startswith("```"):
-            lines = raw.split("\n")
-            raw = "\n".join(lines[1:-1]) if lines[-1].strip() == "```" else raw
+        # 提取 JSON（处理 ```json ... ``` 格式）
+        if '`' in raw:
+            import re as _re
+            m = _re.search(r"`(?:json)?\s*\n(.*?)\n\s*`", raw, _re.DOTALL)
+            if m:
+                raw = m.group(1).strip()
 
         try:
             report = json.loads(raw)

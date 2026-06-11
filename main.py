@@ -17,6 +17,7 @@ import os
 import sys
 import time
 import logging
+from logging.handlers import RotatingFileHandler
 import numpy as np
 import pyautogui
 
@@ -46,7 +47,7 @@ def setup_logging():
     logger.setLevel(logging.INFO)
 
     # 文件处理器 — 详细日志
-    fh = logging.FileHandler(cfg.LOG_FILE, encoding="utf-8")
+    fh = RotatingFileHandler(cfg.LOG_FILE, maxBytes=5*1024*1024, backupCount=3, encoding="utf-8")
     fh.setLevel(logging.INFO)
     fh.setFormatter(logging.Formatter(
         "%(asctime)s [%(levelname)s] %(message)s",
@@ -205,7 +206,7 @@ class PrivacyGuard:
         # 状态追踪
         self.last_trigger_time = 0           # 上次触发时间戳（用于冷却）
         self.last_face_count = 0             # 上一帧的人脸数量
-        self.face_count_stable = 0           # 稳定的人脸数量
+        self.face_count_stable = -1          # 稳定的人脸数量（-1=未初始化，跳过启动首次变化）
         self.face_count_stable_counter = 0   # 人脸数量稳定帧计数
         self.stranger_consecutive = 0        # 连续检测到陌生人的帧数
 
@@ -214,6 +215,8 @@ class PrivacyGuard:
 
         # 无人脸连续帧计数（用于运动触发的前置条件）
         self.no_face_consecutive = 0
+        self._last_trigger_was_motion = False  # 上次触发是否为运动触发
+        self._cam_fail_count = 0               # 摄像头读帧连续失败计数
 
         # 智能分析器（可选）
         self.smart_analyzer = None
@@ -246,9 +249,14 @@ class PrivacyGuard:
                 ret, frame = cap.read()
                 if not ret:
                     logger.warning("摄像头读帧失败，重试中...")
+                    self._cam_fail_count += 1
+                    if self._cam_fail_count >= 50:
+                        logger.error("摄像头连续失败 50 次，自动退出")
+                        break
                     time.sleep(0.1)
                     continue
 
+                self._cam_fail_count = 0  # 重置失败计数
                 # 水平翻转（镜像效果）
                 frame = cv2.flip(frame, 1)
                 display_frame = frame.copy()
@@ -293,6 +301,12 @@ class PrivacyGuard:
 
                 # ---- 3. 运动检测 ----
                 has_motion, motion_ratio = self.motion_detector.detect(frame)
+                # MOG2 warmup: 跳过前N帧的运动检测（背景模型未稳定）
+                if not hasattr(self, "_mog2_warmup_counter"):
+                    self._mog2_warmup_counter = 0
+                self._mog2_warmup_counter += 1
+                if self._mog2_warmup_counter <= cfg.MOTION_HISTORY:
+                    has_motion = False
 
                 # ---- 3.5 无人脸连续帧计数 ----
                 if face_count == 0:
@@ -309,7 +323,10 @@ class PrivacyGuard:
 
                 face_count_changed = False
                 if self.face_count_stable_counter >= cfg.FACE_STABLE_FRAMES:  # 连续N帧稳定后确认
-                    if self.face_count_stable != face_count:
+                    if self.face_count_stable == -1:
+                        self.face_count_stable = face_count
+                        logger.info(f"初始人脸检测基准: {face_count}")
+                    elif self.face_count_stable != face_count:
                         if self.face_count_stable != 0 or face_count != 0:
                             face_count_changed = True
                             logger.info(f"人脸数量变化: {self.face_count_stable} -> {face_count}")
@@ -332,7 +349,7 @@ class PrivacyGuard:
                 # 计算实际冷却时间（运动触发使用倍增冷却）
                 effective_cooldown = cfg.COOLDOWN_SECONDS
                 if self.last_trigger_time > 0:
-                    last_was_motion = getattr(self, '_last_trigger_was_motion', False)
+                    last_was_motion = self._last_trigger_was_motion
                     if last_was_motion:
                         effective_cooldown = cfg.COOLDOWN_SECONDS * cfg.MOTION_TRIGGER_COOLDOWN_MULTIPLIER
 
@@ -403,7 +420,7 @@ class PrivacyGuard:
                             (0, 0, 255) if has_motion else (0, 255, 0), 2)
 
                 # 状态栏 — 底部
-                last_was_motion = getattr(self, '_last_trigger_was_motion', False)
+                last_was_motion = self._last_trigger_was_motion
                 effective_cooldown_display = (cfg.COOLDOWN_SECONDS *
                     cfg.MOTION_TRIGGER_COOLDOWN_MULTIPLIER if last_was_motion
                     else cfg.COOLDOWN_SECONDS)

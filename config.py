@@ -64,7 +64,7 @@ MIMO_MAX_RETRIES = 2
 # 最小分析间隔（秒）— 两次 API 调用之间至少间隔多久，控制 token 消耗
 MIMO_MIN_INTERVAL = 2.0
 # 哪些情况触发智能分析：stranger（陌生人出现）/ face_change（人数变化）/ motion（背景运动）
-MIMO_TRIGGER_CONDITIONS = ["stranger", "face_change"]
+MIMO_TRIGGER_CONDITIONS = ["stranger", "face_change", "motion"]
 
 # ==================== 路径设置 ====================
 KNOWN_FACES_DIR = "known_faces"       # 已知人脸图片存放目录

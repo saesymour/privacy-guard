@@ -221,11 +221,12 @@ Reply ONLY with valid JSON, no other text:
         usage = response.usage
 
         try:
-            # 尝试提取 JSON（处理可能的 markdown 代码块包装）
-            if raw_content.startswith("```"):
-                lines = raw_content.split("\n")
-                raw_content = "\n".join(lines[1:-1]) if lines[-1].strip() == "```" else raw_content
-
+            # Extract JSON from markdown code blocks
+            if '`' in raw_content:
+                import re as _re
+                m = _re.search(r"`(?:json)?\s*\n(.*?)\n\s*`", raw_content, _re.DOTALL)
+                if m:
+                    raw_content = m.group(1).strip()
             result = json.loads(raw_content)
         except json.JSONDecodeError:
             logger.warning(f"JSON 解析失败，原始响应: {raw_content[:200]}")

@@ -110,7 +110,20 @@ def main():
                     face_images.append(face_gray)
                     face_labels.append(0)  # 标签 0 = 主人
                     captured_count += 1
-                    print(f"  [拍摄] 第 {captured_count} 张照片已保存")
+
+                    # 数据增强：生成变体图像提升识别鲁棒性
+                    # 亮度变化版本（模拟不同光照）
+                    bright = cv2.convertScaleAbs(face_gray, alpha=1.3, beta=20)
+                    face_images.append(bright)
+                    face_labels.append(0)
+                    captured_count += 1
+
+                    dark = cv2.convertScaleAbs(face_gray, alpha=0.7, beta=-20)
+                    face_images.append(dark)
+                    face_labels.append(0)
+                    captured_count += 1
+
+                    print(f"  [拍摄] 第 {captured_count} 张照片已保存（含亮度增强）")
             elif len(faces) == 0:
                 print("  [警告] 未检测到人脸，请面对摄像头")
             else:
