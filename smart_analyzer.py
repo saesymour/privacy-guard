@@ -15,6 +15,7 @@ import base64
 import json
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass
 from typing import Optional
@@ -192,7 +193,7 @@ Reply ONLY with valid JSON, no other text:
             },
         ]
 
-        # 带重试的 API 调用
+        # 带重试的 API 调用（不阻塞主线程：移除 sleep，靠 MIMO_MIN_INTERVAL 控频）
         last_error = None
         for attempt in range(self.max_retries + 1):
             try:
@@ -200,70 +201,102 @@ Reply ONLY with valid JSON, no other text:
                     model=self.model,
                     messages=messages,
                     max_tokens=300,
-                    temperature=0.1,  # 低温度确保输出一致性
+                    temperature=0.1,
                     timeout=self.timeout,
                 )
                 break
             except Exception as e:
                 last_error = e
-                if attempt < self.max_retries:
-                    wait = 0.5 * (attempt + 1)
-                    logger.warning(f"API 调用失败 (attempt {attempt + 1}), {wait}s 后重试: {e}")
-                    time.sleep(wait)
+                logger.warning(f"API 调用失败 (attempt {attempt + 1}): {type(e).__name__}")
         else:
-            logger.error(f"API 调用失败，已用尽 {self.max_retries + 1} 次尝试: {last_error}")
+            logger.error(f"API 调用失败，已用尽 {self.max_retries + 1} 次尝试: {type(last_error).__name__}")
             return None
 
         latency_ms = (time.time() - t_start) * 1000
 
-        # 解析响应
-        raw_content = response.choices[0].message.content.strip()
-        usage = response.usage
-
+        # 解析响应 — 防御性处理所有边界情况
         try:
+            if not response.choices:
+                logger.warning("API 返回空 choices，使用规则降级")
+                return self._build_fallback(face_count, stranger_count, has_motion, latency_ms)
+
+            raw_content = response.choices[0].message.content
+            if not raw_content:
+                logger.warning("API 返回空 content，使用规则降级")
+                return self._build_fallback(face_count, stranger_count, has_motion, latency_ms)
+            raw_content = raw_content.strip()
+
             # Extract JSON from markdown code blocks
             if '`' in raw_content:
-                import re as _re
-                m = _re.search(r"`(?:json)?\s*\n(.*?)\n\s*`", raw_content, _re.DOTALL)
+                m = re.search(r"`(?:json)?\s*\n(.*?)\n\s*`", raw_content, re.DOTALL)
                 if m:
                     raw_content = m.group(1).strip()
+
             result = json.loads(raw_content)
-        except json.JSONDecodeError:
-            logger.warning(f"JSON 解析失败，原始响应: {raw_content[:200]}")
-            # 降级：基于规则判断
+            if not isinstance(result, dict):
+                logger.warning("API 返回非 dict JSON，使用规则降级")
+                result = self._fallback_analysis(face_count, stranger_count, has_motion)
+
+        except (json.JSONDecodeError, IndexError, AttributeError, KeyError) as e:
+            logger.warning(f"API 响应解析失败 ({type(e).__name__})，使用规则降级")
             result = self._fallback_analysis(face_count, stranger_count, has_motion)
 
         # 规范化字段
-        threat_level = result.get("threat_level", "low").lower()
+        threat_level = result.get("threat_level", "low")
+        if not isinstance(threat_level, str):
+            threat_level = "low"
+        threat_level = threat_level.lower()
         if threat_level not in ("low", "medium", "high"):
             threat_level = "low"
 
-        action = result.get("action", "ignore").lower()
+        action = result.get("action", "ignore")
+        if not isinstance(action, str):
+            action = "ignore"
+        action = action.lower()
         if action not in ("ignore", "warn", "hide"):
             action = self._default_action(threat_level)
 
+        usage = response.usage
         tokens_used = usage.total_tokens if usage else 0
         self.total_tokens_used += tokens_used
         self.total_calls += 1
         self.total_latency_ms += latency_ms
 
+        reason = result.get("reason", "No reason provided")
+        if not isinstance(reason, str):
+            reason = str(reason)
+
         analysis = ThreatAnalysis(
             threat_level=threat_level,
             action=action,
-            reason=result.get("reason", "No reason provided"),
-            scene_description=result.get("scene_description", ""),
+            reason=reason,
+            scene_description="",  # 不将场景描述写入对象，避免泄露到日志
             tokens_used=tokens_used,
             latency_ms=round(latency_ms, 1),
         )
 
-        level_emoji = {"low": "🟢", "medium": "🟡", "high": "🔴"}
+        level_tag = {"low": "[LOW]", "medium": "[MED]", "high": "[HIGH]"}
         logger.info(
-            f"{level_emoji.get(threat_level, '?')} [{threat_level.upper()}] "
-            f"action={action} | {analysis.reason} | "
+            f"{level_tag.get(threat_level, '[?]')} action={action} | "
             f"tokens={tokens_used} latency={latency_ms:.0f}ms"
         )
 
         return analysis
+
+    def _build_fallback(self, face_count, stranger_count, has_motion, latency_ms):
+        """构建降级结果（API 解析完全失败时）"""
+        result = self._fallback_analysis(face_count, stranger_count, has_motion)
+        tokens_used = 0
+        self.total_calls += 1
+        self.total_latency_ms += latency_ms
+        return ThreatAnalysis(
+            threat_level=result["threat_level"],
+            action=result["action"],
+            reason=result["reason"],
+            scene_description="",
+            tokens_used=0,
+            latency_ms=round(latency_ms, 1),
+        )
 
     def _fallback_analysis(self, face_count: int, stranger_count: int, has_motion: bool) -> dict:
         """当 API 响应无法解析时的降级规则判断"""

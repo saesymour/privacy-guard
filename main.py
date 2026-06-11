@@ -22,49 +22,46 @@ import numpy as np
 import pyautogui
 
 # 导入配置
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import config as cfg
 
 # 智能分析器（可选，需要 MiMo API Key）
 try:
     from smart_analyzer import SmartAnalyzer, create_analyzer_from_config
     SMART_ANALYZER_AVAILABLE = True
-except ImportError:
+except ImportError as e:
     SMART_ANALYZER_AVAILABLE = False
+    _smart_import_error = e
 
 # pyautogui 安全设置 — 鼠标移到左上角可紧急中止
 pyautogui.FAILSAFE = True
 
+logger = logging.getLogger("PrivacyGuard")
+logger.setLevel(logging.INFO)
+
 
 # ============================================================
-# 日志系统初始化
+# 日志系统初始化（文件 + 控制台）
 # ============================================================
 def setup_logging():
-    """配置日志：同时输出到文件和控制台"""
+    """配置日志：同时输出到文件和控制台（仅在 main() 中调用，避免 import 时副作用）"""
     os.makedirs(cfg.LOG_DIR, exist_ok=True)
 
-    logger = logging.getLogger("PrivacyGuard")
-    logger.setLevel(logging.INFO)
-
-    # 文件处理器 — 详细日志
-    fh = RotatingFileHandler(cfg.LOG_FILE, maxBytes=5*1024*1024, backupCount=3, encoding="utf-8")
+    fh = RotatingFileHandler(
+        cfg.LOG_FILE, maxBytes=cfg.LOG_MAX_BYTES,
+        backupCount=cfg.LOG_BACKUP_COUNT, encoding="utf-8",
+    )
     fh.setLevel(logging.INFO)
     fh.setFormatter(logging.Formatter(
         "%(asctime)s [%(levelname)s] %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     ))
 
-    # 控制台处理器 — 简要输出
     ch = logging.StreamHandler()
     ch.setLevel(logging.INFO)
     ch.setFormatter(logging.Formatter("%(asctime)s %(message)s", datefmt="%H:%M:%S"))
 
     logger.addHandler(fh)
     logger.addHandler(ch)
-    return logger
-
-
-logger = setup_logging()
 
 
 # ============================================================
@@ -217,6 +214,7 @@ class PrivacyGuard:
         self.no_face_consecutive = 0
         self._last_trigger_was_motion = False  # 上次触发是否为运动触发
         self._cam_fail_count = 0               # 摄像头读帧连续失败计数
+        self._mog2_warmup_counter = 0          # MOG2 背景模型预热帧计数
 
         # 智能分析器（可选）
         self.smart_analyzer = None
@@ -231,7 +229,7 @@ class PrivacyGuard:
         logger.info(f"人脸识别状态: {'已就绪' if self.face_recognizer.enrolled else '仅检测模式（请先录入人脸）'}")
         logger.info(f"触发冷却: {cfg.COOLDOWN_SECONDS} 秒")
         logger.info(f"MiMo 智能分析: {'已启用' if self.smart_analyzer else '未启用（设置 MIMO_API_KEY 后开启）'}")
-        logger.info("按 Q 键退出程序")
+        logger.info("按 Q 键退出 | 鼠标移到屏幕左上角可紧急中止")
         logger.info("=" * 50)
 
     def run(self):
@@ -241,7 +239,9 @@ class PrivacyGuard:
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, cfg.CAMERA_HEIGHT)
 
         if not cap.isOpened():
-            logger.error("无法打开摄像头！请检查 Windows 隐私设置中的摄像头权限")
+            logger.error("无法打开摄像头，请检查：")
+            logger.error("  1. 摄像头是否被其他程序占用")
+            logger.error("  2. Windows 隐私设置中是否允许应用访问摄像头")
             sys.exit(1)
 
         try:
@@ -250,10 +250,10 @@ class PrivacyGuard:
                 if not ret:
                     logger.warning("摄像头读帧失败，重试中...")
                     self._cam_fail_count += 1
-                    if self._cam_fail_count >= 50:
-                        logger.error("摄像头连续失败 50 次，自动退出")
+                    if self._cam_fail_count >= cfg.CAM_FAIL_THRESHOLD:
+                        logger.error(f"摄像头连续失败 {cfg.CAM_FAIL_THRESHOLD} 次，自动退出")
                         break
-                    time.sleep(0.1)
+                    time.sleep(cfg.CAM_RETRY_SLEEP)
                     continue
 
                 self._cam_fail_count = 0  # 重置失败计数
@@ -273,7 +273,7 @@ class PrivacyGuard:
                     # 裁剪人脸区域并转为灰度
                     face_roi = frame[y:y + h, x:x + w]
                     face_gray = cv2.cvtColor(face_roi, cv2.COLOR_BGR2GRAY)
-                    face_gray = cv2.resize(face_gray, (200, 200))
+                    face_gray = cv2.resize(face_gray, cfg.FACE_RESIZE_DIM)
 
                     is_owner, distance = self.face_recognizer.predict(face_gray)
 
@@ -302,8 +302,6 @@ class PrivacyGuard:
                 # ---- 3. 运动检测 ----
                 has_motion, motion_ratio = self.motion_detector.detect(frame)
                 # MOG2 warmup: 跳过前N帧的运动检测（背景模型未稳定）
-                if not hasattr(self, "_mog2_warmup_counter"):
-                    self._mog2_warmup_counter = 0
                 self._mog2_warmup_counter += 1
                 if self._mog2_warmup_counter <= cfg.MOTION_HISTORY:
                     has_motion = False
@@ -353,9 +351,7 @@ class PrivacyGuard:
                     if last_was_motion:
                         effective_cooldown = cfg.COOLDOWN_SECONDS * cfg.MOTION_TRIGGER_COOLDOWN_MULTIPLIER
 
-                if now - self.last_trigger_time < effective_cooldown:
-                    pass  # 冷却中，不检测
-                else:
+                if now - self.last_trigger_time >= effective_cooldown:
                     # 条件 A：陌生人出现
                     if (self.stranger_consecutive >= cfg.STRANGER_CONSECUTIVE_FRAMES
                             and not self.stranger_already_triggered):
@@ -482,6 +478,12 @@ class PrivacyGuard:
 # 入口
 # ============================================================
 def main():
+    global logger
+    logger = setup_logging()
+
+    if not SMART_ANALYZER_AVAILABLE:
+        logger.debug(f"SmartAnalyzer 不可用: {_smart_import_error}")
+
     guard = PrivacyGuard()
     guard.run()
 

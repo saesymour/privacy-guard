@@ -17,7 +17,6 @@ import sys
 import numpy as np
 
 # 导入配置
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import config as cfg
 
 
@@ -54,9 +53,9 @@ def main():
         print(f"[错误] 无法加载人脸检测模型: {cascade_path}")
         sys.exit(1)
 
-    captured_count = 0
-    face_images = []  # 存储检测到的人脸灰度图
-    face_labels = []  # 标签（本项目中只有一个人，标签均为0）
+    photo_count = 0       # 用户实际拍摄次数（按 SPACE 的次数）
+    face_images = []      # 存储检测到的人脸灰度图（含数据增强）
+    face_labels = []      # 标签（本项目中只有一个人，标签均为0）
 
     print("[信息] 摄像头已就绪，请开始拍摄...\n")
 
@@ -105,25 +104,21 @@ def main():
                 if w > 0 and h > 0:
                     face_roi = frame[y:y + h, x:x + w]
                     face_gray = cv2.cvtColor(face_roi, cv2.COLOR_BGR2GRAY)
-                    # 统一缩放到 200x200
-                    face_gray = cv2.resize(face_gray, (200, 200))
+                    face_gray = cv2.resize(face_gray, cfg.FACE_RESIZE_DIM)
                     face_images.append(face_gray)
                     face_labels.append(0)  # 标签 0 = 主人
-                    captured_count += 1
+                    photo_count += 1
 
                     # 数据增强：生成变体图像提升识别鲁棒性
-                    # 亮度变化版本（模拟不同光照）
-                    bright = cv2.convertScaleAbs(face_gray, alpha=1.3, beta=20)
+                    bright = cv2.convertScaleAbs(face_gray, alpha=cfg.AUG_BRIGHT_ALPHA, beta=cfg.AUG_BRIGHT_BETA)
                     face_images.append(bright)
                     face_labels.append(0)
-                    captured_count += 1
 
-                    dark = cv2.convertScaleAbs(face_gray, alpha=0.7, beta=-20)
+                    dark = cv2.convertScaleAbs(face_gray, alpha=cfg.AUG_DARK_ALPHA, beta=cfg.AUG_DARK_BETA)
                     face_images.append(dark)
                     face_labels.append(0)
-                    captured_count += 1
 
-                    print(f"  [拍摄] 第 {captured_count} 张照片已保存（含亮度增强）")
+                    print(f"  [拍摄] 第 {photo_count} 张照片已保存（共 {len(face_images)} 张训练图像，含增强）")
             elif len(faces) == 0:
                 print("  [警告] 未检测到人脸，请面对摄像头")
             else:
@@ -141,8 +136,8 @@ def main():
     cv2.destroyAllWindows()
 
     # ========== 训练 LBPH 人脸识别模型 ==========
-    if len(face_images) < 5:
-        print(f"\n[错误] 只拍摄了 {len(face_images)} 张照片，至少需要 5 张才能训练模型")
+    if len(face_images) < cfg.MIN_TRAINING_PHOTOS:
+        print(f"\n[错误] 只拍摄了 {len(face_images)} 张训练图像，至少需要 {cfg.MIN_TRAINING_PHOTOS} 张才能训练模型")
         print("  请重新运行此脚本并多拍几张照片")
         sys.exit(1)
 
@@ -150,10 +145,10 @@ def main():
 
     # LBPH 识别器
     recognizer = cv2.face.LBPHFaceRecognizer_create(
-        radius=1,
-        neighbors=8,
-        grid_x=8,
-        grid_y=8,
+        radius=cfg.LBPH_RADIUS,
+        neighbors=cfg.LBPH_NEIGHBORS,
+        grid_x=cfg.LBPH_GRID_X,
+        grid_y=cfg.LBPH_GRID_Y,
     )
 
     recognizer.train(face_images, np.array(face_labels))

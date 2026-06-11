@@ -2,6 +2,7 @@
 隐私守护助手 - 配置文件
 所有可调参数集中管理，修改后重启程序即可生效。
 """
+import os
 
 # ==================== 摄像头设置 ====================
 CAMERA_INDEX = 0          # 摄像头设备索引，0 表示默认笔记本内置摄像头
@@ -67,7 +68,50 @@ MIMO_MIN_INTERVAL = 2.0
 MIMO_TRIGGER_CONDITIONS = ["stranger", "face_change", "motion"]
 
 # ==================== 路径设置 ====================
-KNOWN_FACES_DIR = "known_faces"       # 已知人脸图片存放目录
-TRAINED_MODEL_PATH = "known_faces/trained_model.yml"  # 训练好的识别模型路径
-LOG_DIR = "logs"                       # 日志目录
-LOG_FILE = "logs/privacy_guard.log"    # 日志文件路径
+_PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+KNOWN_FACES_DIR = os.path.join(_PROJECT_ROOT, "known_faces")
+TRAINED_MODEL_PATH = os.path.join(_PROJECT_ROOT, "known_faces", "trained_model.yml")
+LOG_DIR = os.path.join(_PROJECT_ROOT, "logs")
+LOG_FILE = os.path.join(_PROJECT_ROOT, "logs", "privacy_guard.log")
+
+# ==================== 人脸识别训练参数 ====================
+FACE_RESIZE_DIM = (200, 200)            # 人脸统一缩放尺寸
+MIN_TRAINING_PHOTOS = 5                 # 最少拍摄照片数（含增强后的总数）
+LBPH_RADIUS = 1
+LBPH_NEIGHBORS = 8
+LBPH_GRID_X = 8
+LBPH_GRID_Y = 8
+
+# ==================== 数据增强参数 ====================
+AUG_BRIGHT_ALPHA = 1.3
+AUG_BRIGHT_BETA = 20
+AUG_DARK_ALPHA = 0.7
+AUG_DARK_BETA = -20
+
+# ==================== 日志设置 ====================
+LOG_MAX_BYTES = 5 * 1024 * 1024         # 单个日志文件最大 5MB
+LOG_BACKUP_COUNT = 3                    # 保留 3 个备份
+
+# ==================== 摄像头容错设置 ====================
+CAM_FAIL_THRESHOLD = 50                 # 连续失败多少次后自动退出
+CAM_RETRY_SLEEP = 0.1                   # 读帧失败后等待秒数
+
+
+def validate():
+    """校验配置参数的合法性，在 import 时调用"""
+    errors = []
+    if not (0 < MOTION_RATIO_THRESHOLD < 1):
+        errors.append(f"MOTION_RATIO_THRESHOLD 必须在 (0,1)，当前: {MOTION_RATIO_THRESHOLD}")
+    if HAAR_SCALE_FACTOR <= 1.0:
+        errors.append(f"HAAR_SCALE_FACTOR 必须 > 1.0，当前: {HAAR_SCALE_FACTOR}")
+    if COOLDOWN_SECONDS <= 0:
+        errors.append(f"COOLDOWN_SECONDS 必须 > 0，当前: {COOLDOWN_SECONDS}")
+    if FACE_RECOGNITION_THRESHOLD < 0:
+        errors.append(f"FACE_RECOGNITION_THRESHOLD 必须 >= 0，当前: {FACE_RECOGNITION_THRESHOLD}")
+    if not isinstance(CAMERA_INDEX, (int, str)):
+        errors.append(f"CAMERA_INDEX 必须是 int 或 str，当前: {type(CAMERA_INDEX).__name__}")
+    if errors:
+        raise ValueError("配置校验失败:\n  " + "\n  ".join(errors))
+
+
+validate()

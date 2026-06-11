@@ -16,6 +16,7 @@ API 格式：OpenAI 兼容（base_url: https://api.xiaomimimo.com/v1）
 import json
 import logging
 import os
+import re
 import sys
 from datetime import datetime
 from typing import Optional
@@ -72,6 +73,16 @@ If the log is empty (no triggers), set risk_assessment to nothing recorded."""
         self.model = model or self.DEFAULT_MODEL
         self.client = OpenAI(api_key=api_key, base_url=self.base_url)
 
+    @staticmethod
+    def _empty_report(recommendations=None, risk="No data."):
+        return {
+            "summary": {"total_triggers": 0, "by_reason": {}, "peak_hour": "N/A",
+                        "false_positive_estimate": "N/A"},
+            "anomalies": [],
+            "recommendations": recommendations or [],
+            "risk_assessment": risk,
+        }
+
     def read_log(self, log_path: str, max_lines: int = 500) -> str:
         """读取日志文件内容，限制最大行数"""
         if not os.path.exists(log_path):
@@ -109,13 +120,7 @@ If the log is empty (no triggers), set risk_assessment to nothing recorded."""
         try:
             log_content = self.read_log(log_path)
         except FileNotFoundError:
-            return {
-                "summary": {"total_triggers": 0, "by_reason": {}, "peak_hour": "N/A",
-                            "false_positive_estimate": "N/A"},
-                "anomalies": [],
-                "recommendations": ["日志文件不存在，请先运行主程序生成日志"],
-                "risk_assessment": "No log data available.",
-            }
+            return self._empty_report(recommendations=["日志文件不存在，请先运行主程序生成日志"])
 
         prompt = f"""Date: {date}
 Tool: Privacy Guard v1.0
@@ -139,35 +144,26 @@ Generate a daily report based on the log above."""
                 timeout=30.0,
             )
         except Exception as e:
-            logger.error(f"API 调用失败: {e}")
-            return {
-                "summary": {"total_triggers": 0, "by_reason": {}, "peak_hour": "N/A",
-                            "false_positive_estimate": "N/A"},
-                "anomalies": [],
-                "recommendations": [f"API 调用失败: {e}"],
-                "risk_assessment": "Report generation failed.",
-            }
+            logger.error(f"API 调用失败: {type(e).__name__}")
+            return self._empty_report(recommendations=[f"API 调用失败: {type(e).__name__}"], risk="Report generation failed.")
 
-        raw = response.choices[0].message.content.strip()
+        raw_content = response.choices[0].message.content
+        if not raw_content:
+            logger.warning("API 返回空 content")
+            return self._empty_report(recommendations=["API 返回空响应"], risk="Report generation failed.")
+        raw = raw_content.strip()
 
         # 提取 JSON（处理 ```json ... ``` 格式）
         if '`' in raw:
-            import re as _re
-            m = _re.search(r"`(?:json)?\s*\n(.*?)\n\s*`", raw, _re.DOTALL)
+            m = re.search(r"`(?:json)?\s*\n(.*?)\n\s*`", raw, re.DOTALL)
             if m:
                 raw = m.group(1).strip()
 
         try:
             report = json.loads(raw)
         except json.JSONDecodeError:
-            logger.warning(f"JSON 解析失败，使用原始文本: {raw[:300]}")
-            report = {
-                "summary": {"total_triggers": 0, "by_reason": {}, "peak_hour": "N/A",
-                            "false_positive_estimate": "N/A"},
-                "anomalies": [],
-                "recommendations": [],
-                "risk_assessment": raw,
-            }
+            logger.warning("JSON 解析失败，使用原始文本作为风险评估")
+            report = self._empty_report(risk=raw[:500])
 
         tokens = response.usage.total_tokens if response.usage else 0
         report["_meta"] = {
@@ -180,7 +176,7 @@ Generate a daily report based on the log above."""
 
     def print_report(self, report: dict):
         """格式化打印日报"""
-        meta = report.pop("_meta", {})
+        meta = report.get("_meta", {})
         summary = report.get("summary", {})
 
         print("=" * 60)
